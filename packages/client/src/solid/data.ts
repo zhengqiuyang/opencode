@@ -1060,6 +1060,9 @@ export function createData(config: CreateDataInput) {
       case "session.text.ended":
         message.editText(event.data.sessionID, event.data.assistantMessageID, (text) => {
           text.text = event.data.text
+          // Keep the provider-native block the server projection persists, so the
+          // live transcript matches a reload (session-ui reads native.phase).
+          if (event.data.native !== undefined) text.native = event.data.native
         })
         return
       case "session.tool.input.started":
