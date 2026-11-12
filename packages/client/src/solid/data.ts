@@ -974,6 +974,9 @@ export function createData(config: CreateDataInput) {
           const position = index.get(event.data.assistantMessageID)
           const existing = position === undefined ? undefined : draft[position]
           if (existing?.type === "assistant") {
+            // SSE delivery is at-least-once (#61401): a re-delivered
+            // step.started must not regress a message that already settled.
+            if (existing.time.completed !== undefined) return
             existing.agent = event.data.agent
             existing.model = event.data.model
             existing.retry = undefined
@@ -1064,6 +1067,10 @@ export function createData(config: CreateDataInput) {
         return
       case "session.tool.input.started":
         message.editAssistant(event.data.sessionID, event.data.assistantMessageID, (assistant) => {
+          // At-least-once delivery (#61401): a re-delivered started event
+          // carries the same tool id — appending would leave two same-id
+          // tool parts, the first stuck at "streaming".
+          if (assistant.content.some((part) => part.type === "tool" && part.id === event.data.id)) return
           assistant.content.push({
             type: "tool",
             id: event.data.id,
@@ -1251,6 +1258,9 @@ export function createData(config: CreateDataInput) {
         return
       case "session.compaction.ended":
         message.update(event.data.sessionID, (draft, index) => {
+          // A re-delivered settlement event (same event id) must settle nothing
+          // twice — and must not mark a newer running row with a stale summary.
+          if (index.has(SessionMessage.ID.fromEvent(event.id))) return
           const position = draft.findLastIndex((item) => item.type === "compaction" && item.status === "running")
           const current = draft[position]
           if (current?.type === "compaction") {
@@ -1263,6 +1273,9 @@ export function createData(config: CreateDataInput) {
               cost: event.data.cost,
               tokens: event.data.tokens,
             })
+            // Register the settlement event id so a re-delivered ended event
+            // hits the append guard instead of adding a duplicate row (#61426).
+            index.set(SessionMessage.ID.fromEvent(event.id), position)
             return
           }
           message.append(draft, index, {
@@ -1282,6 +1295,8 @@ export function createData(config: CreateDataInput) {
       case "session.compaction.failed":
         if (event.data.inputID) removePending(event.data.sessionID, event.data.inputID)
         message.update(event.data.sessionID, (draft, index) => {
+          // Same re-delivery guard as session.compaction.ended above (#61426).
+          if (index.has(SessionMessage.ID.fromEvent(event.id))) return
           const position = draft.findLastIndex((item) => item.type === "compaction" && item.status === "running")
           const current = draft[position]
           const failed: Extract<SessionMessageInfo, { type: "compaction"; status: "failed" }> = {
@@ -1297,6 +1312,7 @@ export function createData(config: CreateDataInput) {
           }
           if (current?.type === "compaction") {
             draft[position] = failed
+            index.set(SessionMessage.ID.fromEvent(event.id), position)
             return
           }
           message.append(draft, index, failed)
